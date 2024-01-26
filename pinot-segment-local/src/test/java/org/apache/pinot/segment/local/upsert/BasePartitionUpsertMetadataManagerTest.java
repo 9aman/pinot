@@ -143,7 +143,7 @@ public class BasePartitionUpsertMetadataManagerTest {
     }
 
     @Override
-    protected long getNumPrimaryKeys() {
+    public long getNumPrimaryKeys() {
       return 0;
     }
 

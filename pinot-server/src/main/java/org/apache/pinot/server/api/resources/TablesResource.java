@@ -77,10 +77,12 @@ import org.apache.pinot.common.utils.helix.HelixHelper;
 import org.apache.pinot.core.data.manager.InstanceDataManager;
 import org.apache.pinot.core.data.manager.offline.ImmutableSegmentDataManager;
 import org.apache.pinot.core.data.manager.realtime.RealtimeSegmentDataManager;
+import org.apache.pinot.core.data.manager.realtime.RealtimeTableDataManager;
 import org.apache.pinot.core.data.manager.realtime.SegmentUploader;
 import org.apache.pinot.segment.local.data.manager.SegmentDataManager;
 import org.apache.pinot.segment.local.data.manager.TableDataManager;
 import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentImpl;
+import org.apache.pinot.segment.local.upsert.BasePartitionUpsertMetadataManager;
 import org.apache.pinot.segment.spi.ColumnMetadata;
 import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.IndexSegment;
@@ -218,6 +220,11 @@ public class TablesResource {
     Map<String, Double> columnCardinalityMap = new HashMap<>();
     Map<String, Double> maxNumMultiValuesMap = new HashMap<>();
     Map<String, Map<String, Double>> columnIndexSizesMap = new HashMap<>();
+    Map<String, Long> partitionIDToPK = new HashMap<>();
+    RealtimeTableDataManager realtimeTableDataManager = null;
+    if (tableDataManager instanceof RealtimeTableDataManager) {
+      realtimeTableDataManager = (RealtimeTableDataManager) tableDataManager;
+    }
     try {
       for (SegmentDataManager segmentDataManager : segmentDataManagers) {
         if (segmentDataManager instanceof ImmutableSegmentDataManager) {
@@ -273,6 +280,18 @@ public class TablesResource {
             }
           }
         }
+        if (LLCSegmentName.isLLCSegment(segmentDataManager.getSegmentName())) {
+          if (realtimeTableDataManager != null && realtimeTableDataManager.isUpsertEnabled()) {
+            LLCSegmentName llcSegmentName = new LLCSegmentName(segmentDataManager.getSegmentName());
+            if (!partitionIDToPK.containsKey(llcSegmentName.getPartitionGroupId())) {
+              BasePartitionUpsertMetadataManager basePartitionUpsertMetadataManager =
+                  (BasePartitionUpsertMetadataManager) realtimeTableDataManager.getTableUpsertMetadataManager()
+                      .getOrCreatePartitionManager(llcSegmentName.getPartitionGroupId());
+              partitionIDToPK.put(String.valueOf(llcSegmentName.getPartitionGroupId()),
+                  basePartitionUpsertMetadataManager.getNumPrimaryKeys());
+            }
+          }
+        }
       }
     } finally {
       // we could release segmentDataManagers as we iterate in the loop above
@@ -285,7 +304,8 @@ public class TablesResource {
 
     TableMetadataInfo tableMetadataInfo =
         new TableMetadataInfo(tableDataManager.getTableName(), totalSegmentSizeBytes, segmentDataManagers.size(),
-            totalNumRows, columnLengthMap, columnCardinalityMap, maxNumMultiValuesMap, columnIndexSizesMap);
+            totalNumRows, columnLengthMap, columnCardinalityMap, maxNumMultiValuesMap, columnIndexSizesMap,
+            partitionIDToPK);
     return ResourceUtils.convertToJsonString(tableMetadataInfo);
   }
 

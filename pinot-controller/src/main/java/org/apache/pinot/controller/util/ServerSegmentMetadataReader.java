@@ -149,7 +149,7 @@ public class ServerSegmentMetadataReader {
 
     TableMetadataInfo aggregateTableMetadataInfo =
         new TableMetadataInfo(tableNameWithType, totalDiskSizeInBytes, totalNumSegments, totalNumRows, columnLengthMap,
-            columnCardinalityMap, maxNumMultiValuesMap, columnIndexSizeMap);
+            columnCardinalityMap, maxNumMultiValuesMap, columnIndexSizeMap, new HashMap<>());
     if (failedParses != 0) {
       LOGGER.warn("Failed to parse {} / {} aggregated segment metadata responses from servers.", failedParses,
           serverUrls.size());

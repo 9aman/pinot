@@ -251,7 +251,7 @@ public abstract class BasePartitionUpsertMetadataManager implements PartitionUps
         System.currentTimeMillis() - startTimeMs, numPrimaryKeys);
   }
 
-  protected abstract long getNumPrimaryKeys();
+  public abstract long getNumPrimaryKeys();
 
   protected void updatePrimaryKeyGauge(long numPrimaryKeys) {
     _serverMetrics.setValueOfPartitionGauge(_tableNameWithType, _partitionId, ServerGauge.UPSERT_PRIMARY_KEYS_COUNT,

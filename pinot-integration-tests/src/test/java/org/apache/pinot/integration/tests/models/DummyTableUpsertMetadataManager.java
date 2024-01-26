@@ -83,7 +83,7 @@ public class DummyTableUpsertMetadataManager extends BaseTableUpsertMetadataMana
     }
 
     @Override
-    protected long getNumPrimaryKeys() {
+    public long getNumPrimaryKeys() {
       return 0;
     }
 
