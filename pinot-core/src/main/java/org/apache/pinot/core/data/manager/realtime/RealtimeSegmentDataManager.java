@@ -827,9 +827,7 @@ public class RealtimeSegmentDataManager extends SegmentDataManager {
 
                 // TODO: might need to support the two ways in which stream config can be set. On under the ingestion
                 //  config and other under the tableIndexConfig
-                if (_tableConfig.getIngestionConfig() != null
-                    && _tableConfig.getIngestionConfig().getStreamIngestionConfig() != null
-                    && _tableConfig.getIngestionConfig().getStreamIngestionConfig().getPauselessConsumptionEnabled()) {
+                if (isPauselessEnabeld()) {
                   _segmentLogger.info("Pauseless is enabled");
                   if (!startSegmentCommit(response.getControllerVipUrl())) {
                     // If for any reason commit failed, we don't want to be in COMMITTING state when we hold.
@@ -840,7 +838,6 @@ public class RealtimeSegmentDataManager extends SegmentDataManager {
                     break;
                   }
                 }
-
                 long buildTimeSeconds = response.getBuildTimeSeconds();
                 buildSegmentForCommit(buildTimeSeconds * 1000L);
                 if (_segmentBuildDescriptor == null) {
@@ -913,8 +910,7 @@ public class RealtimeSegmentDataManager extends SegmentDataManager {
     SegmentCompletionProtocol.Request.Params params = new SegmentCompletionProtocol.Request.Params();
     params.withSegmentName(_segmentNameStr).withStreamPartitionMsgOffset(_currentOffset.toString())
         .withNumRows(_numRowsConsumed).withInstanceId(_instanceId).withReason(_stopReason)
-        .withPauselessConsumptionEnabled(
-            _tableConfig.getIngestionConfig().getStreamIngestionConfig().getPauselessConsumptionEnabled());
+        .withPauselessConsumptionEnabled(isPauselessEnabeld());
     if (_isOffHeap) {
       params.withMemoryUsedBytes(_memoryManager.getTotalAllocatedBytes());
     }
@@ -926,6 +922,18 @@ public class RealtimeSegmentDataManager extends SegmentDataManager {
       return false;
     }
     return true;
+  }
+
+  private boolean isPauselessEnabeld() {
+    if (_tableConfig.getIngestionConfig() != null
+        && _tableConfig.getIngestionConfig().getStreamIngestionConfig() != null && _tableConfig.getIngestionConfig()
+        .getStreamIngestionConfig().getPauselessConsumptionEnabled()) {
+      return true;
+    }
+    if (_tableConfig.getIndexingConfig() != null && _tableConfig.getIndexingConfig().getPauselessConsumptionEnabled()) {
+      return true;
+    }
+    return false;
   }
 
   // Side effect: Modifies _segmentBuildDescriptor if we do not have a valid built segment file and we
@@ -1190,8 +1198,8 @@ public class RealtimeSegmentDataManager extends SegmentDataManager {
         .withNumRows(_numRowsConsumed).withInstanceId(_instanceId).withReason(_stopReason)
         .withBuildTimeMillis(_segmentBuildDescriptor.getBuildTimeMillis())
         .withSegmentSizeBytes(_segmentBuildDescriptor.getSegmentSizeBytes())
-        .withWaitTimeMillis(_segmentBuildDescriptor.getWaitTimeMillis()).withPauselessConsumptionEnabled(
-            _tableConfig.getIngestionConfig().getStreamIngestionConfig().getPauselessConsumptionEnabled());
+        .withWaitTimeMillis(_segmentBuildDescriptor.getWaitTimeMillis())
+        .withPauselessConsumptionEnabled(isPauselessEnabeld());
     if (_isOffHeap) {
       params.withMemoryUsedBytes(_memoryManager.getTotalAllocatedBytes());
     }
@@ -1309,8 +1317,7 @@ public class RealtimeSegmentDataManager extends SegmentDataManager {
     SegmentCompletionProtocol.Request.Params params = new SegmentCompletionProtocol.Request.Params();
     params.withStreamPartitionMsgOffset(_currentOffset.toString()).withSegmentName(_segmentNameStr)
         .withReason(_stopReason).withNumRows(_numRowsConsumed).withInstanceId(_instanceId)
-        .withPauselessConsumptionEnabled(
-            _tableConfig.getIngestionConfig().getStreamIngestionConfig().getPauselessConsumptionEnabled());
+        .withPauselessConsumptionEnabled(isPauselessEnabeld());
     if (_isOffHeap) {
       params.withMemoryUsedBytes(_memoryManager.getTotalAllocatedBytes());
     }
