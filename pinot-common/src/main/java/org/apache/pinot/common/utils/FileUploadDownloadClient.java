@@ -55,9 +55,10 @@ import org.apache.hc.core5.http.io.support.ClassicRequestBuilder;
 import org.apache.hc.core5.http.message.BasicNameValuePair;
 import org.apache.pinot.common.auth.AuthProviderUtils;
 import org.apache.pinot.common.exception.HttpErrorStatusException;
+import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
+import org.apache.pinot.common.metadata.segment.SegmentZKMetadataUtils;
 import org.apache.pinot.common.restlet.resources.EndReplaceSegmentsRequest;
 import org.apache.pinot.common.restlet.resources.StartReplaceSegmentsRequest;
-import org.apache.pinot.common.restlet.resources.TableLLCSegmentUploadResponse;
 import org.apache.pinot.common.utils.http.HttpClient;
 import org.apache.pinot.common.utils.http.HttpClientConfig;
 import org.apache.pinot.spi.auth.AuthProvider;
@@ -125,6 +126,7 @@ public class FileUploadDownloadClient implements AutoCloseable {
   private static final String FORCE_CLEANUP_PARAMETER = "&forceCleanup=";
 
   private static final String RETENTION_PARAMETER = "retention=";
+  public static final String REINGEST_SEGMENT_PATH = "/reingestSegment";
 
   private static final List<String> SUPPORTED_PROTOCOLS = Arrays.asList(HTTP, HTTPS);
 
@@ -968,26 +970,25 @@ public class FileUploadDownloadClient implements AutoCloseable {
    * Used by controllers to send requests to servers: Controller periodic task uses this endpoint to ask servers
    * to upload committed llc segment to segment store if missing.
    * @param uri The uri to ask servers to upload segment to segment store
-   * @return {@link TableLLCSegmentUploadResponse} - segment download url, crc, other metadata
+   * @return {@link SegmentZKMetadata} - segment download url, crc, other metadata
    * @throws URISyntaxException
    * @throws IOException
    * @throws HttpErrorStatusException
    */
-  public TableLLCSegmentUploadResponse uploadLLCToSegmentStore(String uri)
+  public SegmentZKMetadata uploadLLCToSegmentStore(String uri)
       throws URISyntaxException, IOException, HttpErrorStatusException {
     ClassicRequestBuilder requestBuilder = ClassicRequestBuilder.post(new URI(uri)).setVersion(HttpVersion.HTTP_1_1);
     // sendRequest checks the response status code
     SimpleHttpResponse response = HttpClient.wrapAndThrowHttpException(
         _httpClient.sendRequest(requestBuilder.build(), HttpClient.DEFAULT_SOCKET_TIMEOUT_MS));
-    TableLLCSegmentUploadResponse tableLLCSegmentUploadResponse = JsonUtils.stringToObject(response.getResponse(),
-        TableLLCSegmentUploadResponse.class);
-    if (tableLLCSegmentUploadResponse.getDownloadUrl() == null
-        || tableLLCSegmentUploadResponse.getDownloadUrl().isEmpty()) {
+    SegmentZKMetadata segmentZKMetadata = SegmentZKMetadataUtils.deserialize(response.getResponse());
+    if (segmentZKMetadata.getDownloadUrl() == null
+        || segmentZKMetadata.getDownloadUrl().isEmpty()) {
       throw new HttpErrorStatusException(
           String.format("Returned segment download url is empty after requesting servers to upload by the path: %s",
               uri), response.getStatusCode());
     }
-    return tableLLCSegmentUploadResponse;
+    return segmentZKMetadata;
   }
 
   /**
@@ -1246,6 +1247,59 @@ public class FileUploadDownloadClient implements AutoCloseable {
       throws IOException, HttpErrorStatusException {
     return _httpClient.downloadUntarFileStreamed(uri, HttpClient.DEFAULT_SOCKET_TIMEOUT_MS, dest, authProvider,
         httpHeaders, maxStreamRateInByte);
+  }
+
+  /**
+   * Invokes the server's reIngestSegment API via a POST request with JSON payload,
+   * using Simple HTTP APIs.
+   *
+   * POST http://[serverURL]/reIngestSegment
+   * {
+   *   "tableNameWithType": [tableName],
+   *   "segmentName": [segmentName]
+   * }
+   */
+  public void triggerReIngestion(String serverHostPort, String tableNameWithType, String segmentName)
+      throws IOException, URISyntaxException, HttpErrorStatusException {
+    String scheme = HTTP;
+    if (serverHostPort.contains(HTTPS)) {
+      scheme = HTTPS;
+      serverHostPort = serverHostPort.replace(HTTPS + "://", "");
+    } else if (serverHostPort.contains(HTTP)) {
+      serverHostPort = serverHostPort.replace(HTTP + "://", "");
+    }
+
+    String serverHost = serverHostPort.split(":")[0];
+    String serverPort = serverHostPort.split(":")[1];
+
+    URI reIngestUri = getURI(scheme, serverHost, Integer.parseInt(serverPort), REINGEST_SEGMENT_PATH);
+
+    // Build the JSON payload
+    Map<String, Object> requestJson = new HashMap<>();
+    requestJson.put("tableNameWithType", tableNameWithType);
+    requestJson.put("segmentName", segmentName);
+
+    // Convert the request payload to JSON string
+    String jsonPayload = JsonUtils.objectToString(requestJson);
+    // Prepare a POST request with Simple HTTP
+    ClassicRequestBuilder requestBuilder = ClassicRequestBuilder
+        .post(reIngestUri)
+        .setVersion(HttpVersion.HTTP_1_1)
+        .setHeader("Content-Type", "application/json")
+        .setHeader("Accept", "application/json")
+        .setEntity(new StringEntity(jsonPayload, ContentType.APPLICATION_JSON));
+
+    // Send the request using your custom HttpClient wrapper.
+    // (Adjust the timeout as needed in your environment)
+    SimpleHttpResponse response = HttpClient.wrapAndThrowHttpException(
+        _httpClient.sendRequest(requestBuilder.build(), HttpClient.DEFAULT_SOCKET_TIMEOUT_MS));
+
+    // Check that we got a 2xx response
+    int statusCode = response.getStatusCode();
+    if (statusCode / 100 != 2) {
+      throw new IOException(String.format("Failed POST to %s, HTTP %d: %s",
+          reIngestUri, statusCode, response.getResponse()));
+    }
   }
 
   /**
