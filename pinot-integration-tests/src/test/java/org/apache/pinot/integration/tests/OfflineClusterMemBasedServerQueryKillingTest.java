@@ -38,7 +38,6 @@ import org.apache.log4j.Level;
 import org.apache.log4j.LogManager;
 import org.apache.pinot.core.accounting.PerQueryCPUMemAccountantFactory;
 import org.apache.pinot.spi.accounting.ThreadResourceUsageProvider;
-import org.apache.pinot.spi.config.instance.InstanceType;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.data.FieldSpec;
@@ -180,8 +179,6 @@ public class OfflineClusterMemBasedServerQueryKillingTest extends BaseClusterInt
     brokerConf.setProperty(CommonConstants.PINOT_QUERY_SCHEDULER_PREFIX + "."
         + CommonConstants.Accounting.CONFIG_OF_CRITICAL_LEVEL_HEAP_USAGE_RATIO, 0.60f);
     brokerConf.setProperty(CommonConstants.PINOT_QUERY_SCHEDULER_PREFIX + "."
-        + CommonConstants.Accounting.CONFIG_OF_INSTANCE_TYPE, InstanceType.BROKER);
-    brokerConf.setProperty(CommonConstants.PINOT_QUERY_SCHEDULER_PREFIX + "."
         + CommonConstants.Accounting.CONFIG_OF_PANIC_LEVEL_HEAP_USAGE_RATIO, 1.1f);
     brokerConf.setProperty(CommonConstants.PINOT_QUERY_SCHEDULER_PREFIX + "."
             + CommonConstants.Accounting.CONFIG_OF_FACTORY_NAME,
@@ -224,6 +221,22 @@ public class OfflineClusterMemBasedServerQueryKillingTest extends BaseClusterInt
     Assert.assertTrue(exceptionsNode, exceptionsNode.contains("\"errorCode\":"
         + QueryErrorCode.QUERY_CANCELLATION.getId()));
     Assert.assertTrue(exceptionsNode, exceptionsNode.contains("got killed because"));
+  }
+
+  @Test(dataProvider = "useBothQueryEngines")
+  public void testMemoryAllocationStats(boolean useMultiStageQueryEngine)
+      throws Exception {
+    setUseMultiStageQueryEngine(useMultiStageQueryEngine);
+    notSupportedInV2();
+    JsonNode queryResponse = postQuery(COUNT_STAR_QUERY);
+    long offlineThreadMemAllocatedBytes = queryResponse.get("offlineThreadMemAllocatedBytes").asLong();
+    long offlineResponseSerMemAllocatedBytes = queryResponse.get("offlineResponseSerMemAllocatedBytes").asLong();
+    long offlineTotalMemAllocatedBytes = queryResponse.get("offlineTotalMemAllocatedBytes").asLong();
+
+    Assert.assertTrue(offlineThreadMemAllocatedBytes > 0);
+    Assert.assertTrue(offlineResponseSerMemAllocatedBytes > 0);
+    Assert.assertEquals(offlineTotalMemAllocatedBytes,
+        offlineThreadMemAllocatedBytes + offlineResponseSerMemAllocatedBytes);
   }
 
   @Test(dataProvider = "useBothQueryEngines")

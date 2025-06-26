@@ -31,12 +31,14 @@ import org.apache.calcite.rel.RelCollations;
 import org.apache.calcite.rel.RelDistribution;
 import org.apache.calcite.rel.RelDistributions;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.Join;
 import org.apache.calcite.rel.core.JoinInfo;
 import org.apache.calcite.rel.core.Window;
 import org.apache.pinot.calcite.rel.hint.PinotHintOptions;
-import org.apache.pinot.calcite.rel.rules.PinotRuleUtils;
 import org.apache.pinot.query.context.PhysicalPlannerContext;
+import org.apache.pinot.query.planner.physical.v2.PRelNode;
 import org.apache.pinot.query.planner.physical.v2.nodes.PhysicalAggregate;
+import org.apache.pinot.query.planner.physical.v2.nodes.PhysicalAsOfJoin;
 import org.apache.pinot.query.planner.physical.v2.nodes.PhysicalJoin;
 import org.apache.pinot.query.planner.physical.v2.nodes.PhysicalProject;
 import org.apache.pinot.query.planner.physical.v2.nodes.PhysicalSort;
@@ -52,33 +54,37 @@ import org.apache.pinot.query.planner.physical.v2.nodes.PhysicalWindow;
 public class TraitAssignment {
   private final Supplier<Integer> _planIdGenerator;
 
-  public TraitAssignment(Supplier<Integer> planIdGenerator) {
+  private TraitAssignment(Supplier<Integer> planIdGenerator) {
     _planIdGenerator = planIdGenerator;
   }
 
-  public static RelNode assign(RelNode relNode, PhysicalPlannerContext physicalPlannerContext) {
+  public static PRelNode assign(PRelNode pRelNode, PhysicalPlannerContext physicalPlannerContext) {
     TraitAssignment traitAssignment = new TraitAssignment(physicalPlannerContext.getNodeIdGenerator());
-    return traitAssignment.assign(relNode);
+    return traitAssignment.assign(pRelNode);
   }
 
-  public RelNode assign(RelNode node) {
+  @VisibleForTesting
+  PRelNode assign(PRelNode pRelNode) {
     // Process inputs first.
+    RelNode relNode = pRelNode.unwrap();
     List<RelNode> newInputs = new ArrayList<>();
-    for (RelNode input : node.getInputs()) {
-      newInputs.add(assign(input));
+    for (RelNode input : relNode.getInputs()) {
+      newInputs.add(assign((PRelNode) input).unwrap());
     }
-    node = node.copy(node.getTraitSet(), newInputs);
-    // Process current node.
-    if (node instanceof PhysicalSort) {
-      return assignSort((PhysicalSort) node);
-    } else if (node instanceof PhysicalJoin) {
-      return assignJoin((PhysicalJoin) node);
-    } else if (node instanceof PhysicalAggregate) {
-      return assignAggregate((PhysicalAggregate) node);
-    } else if (node instanceof PhysicalWindow) {
-      return assignWindow((PhysicalWindow) node);
+    relNode = relNode.copy(relNode.getTraitSet(), newInputs);
+    // Process current relNode.
+    if (relNode instanceof PhysicalSort) {
+      return (PRelNode) assignSort((PhysicalSort) relNode);
+    } else if (relNode instanceof PhysicalJoin) {
+      return (PRelNode) assignJoin((PhysicalJoin) relNode);
+    } else if (relNode instanceof PhysicalAsOfJoin) {
+      return (PRelNode) assignJoin((PhysicalAsOfJoin) relNode);
+    } else if (relNode instanceof PhysicalAggregate) {
+      return (PRelNode) assignAggregate((PhysicalAggregate) relNode);
+    } else if (relNode instanceof PhysicalWindow) {
+      return (PRelNode) assignWindow((PhysicalWindow) relNode);
     }
-    return node;
+    return (PRelNode) relNode;
   }
 
   /**
@@ -103,23 +109,30 @@ public class TraitAssignment {
    * </p>
    */
   @VisibleForTesting
-  RelNode assignJoin(PhysicalJoin join) {
+  RelNode assignJoin(Join join) {
     // Case-1: Handle lookup joins.
     if (PinotHintOptions.JoinHintOptions.useLookupJoinStrategy(join)) {
       return assignLookupJoin(join);
     }
     // Case-2: Handle dynamic filter for semi joins.
     JoinInfo joinInfo = join.analyzeCondition();
-    if (join.isSemiJoin() && joinInfo.nonEquiConditions.isEmpty() && joinInfo.leftKeys.size() == 1) {
+    /* if (join.isSemiJoin() && joinInfo.nonEquiConditions.isEmpty() && joinInfo.leftKeys.size() == 1) {
       if (PinotRuleUtils.canPushDynamicBroadcastToLeaf(join.getLeft())) {
         return assignDynamicFilterSemiJoin(join);
       }
-    }
+    } */
+    Preconditions.checkState(joinInfo.leftKeys.size() == joinInfo.rightKeys.size(),
+        "Always expect left and right keys to be same size. Found: %s and %s",
+        joinInfo.leftKeys, joinInfo.rightKeys);
     // Case-3: Default case.
-    RelDistribution leftDistribution = joinInfo.leftKeys.isEmpty() ? RelDistributions.RANDOM_DISTRIBUTED
-        : RelDistributions.hash(joinInfo.leftKeys);
-    RelDistribution rightDistribution = joinInfo.rightKeys.isEmpty() ? RelDistributions.BROADCAST_DISTRIBUTED
-        : RelDistributions.hash(joinInfo.rightKeys);
+    RelDistribution rightDistribution = !joinInfo.rightKeys.isEmpty() ? RelDistributions.hash(joinInfo.rightKeys)
+        : RelDistributions.BROADCAST_DISTRIBUTED;
+    RelDistribution leftDistribution;
+    if (joinInfo.leftKeys.isEmpty() || rightDistribution == RelDistributions.BROADCAST_DISTRIBUTED) {
+      leftDistribution = RelDistributions.RANDOM_DISTRIBUTED;
+    } else {
+      leftDistribution = RelDistributions.hash(joinInfo.leftKeys);
+    }
     // left-input
     RelNode leftInput = join.getInput(0);
     RelTraitSet leftTraitSet = leftInput.getTraitSet().plus(leftDistribution);
@@ -207,7 +220,7 @@ public class TraitAssignment {
     return window.copy(window.getTraitSet(), ImmutableList.of(input));
   }
 
-  private RelNode assignLookupJoin(PhysicalJoin join) {
+  private RelNode assignLookupJoin(Join join) {
     /*
      * Lookup join expects right input to have project and table-scan nodes exactly. Moreover, lookup join is used
      * with Dimension tables only. Given this, we expect the entire right input to be available in all workers
@@ -230,6 +243,7 @@ public class TraitAssignment {
     return join.copy(join.getTraitSet(), ImmutableList.of(leftInput, newProject));
   }
 
+  @SuppressWarnings("unused")
   private RelNode assignDynamicFilterSemiJoin(PhysicalJoin join) {
     /*
      * When dynamic broadcast is enabled, push broadcast trait to right input along with the pipeline breaker

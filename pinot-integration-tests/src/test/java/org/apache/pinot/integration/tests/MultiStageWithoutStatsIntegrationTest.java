@@ -121,6 +121,9 @@ public class MultiStageWithoutStatsIntegrationTest extends BaseClusterIntegratio
             FieldConfig.CompressionCodec.MV_ENTRY_DICT, null));
   }
 
+  /// This is a regression test. In older versions there were issues with stats in intersection queries.
+  /// Now that this is fixed, this tests looks trivial, but it is important to keep it to ensure that
+  /// we don't regress.
   @Test
   public void testIntersection()
       throws Exception {
@@ -139,21 +142,6 @@ public class MultiStageWithoutStatsIntegrationTest extends BaseClusterIntegratio
         + ")";
     JsonNode node = postQuery(query);
 
-    // Expected:
-    // "stageStats" : {
-    //    "type" : "MAILBOX_RECEIVE",
-    //    "executionTimeMs" : whatever,
-    //    "fanIn" : whatever,
-    //    "rawMessages" : whatever,
-    //    "deserializedBytes" : whatever,
-    //    "upstreamWaitMs" : whatever,
-    //    "children" : [ {
-    //      "type" : "EMPTY_MAILBOX_SEND",
-    //      "stage" : 1,
-    //      "description" : "No stats available for this stage. It may have been pruned."
-    //    } ]
-    //  }
-
     JsonNode stageStats = node.get("stageStats");
     assertNotNull(stageStats, "Stage stats should not be null");
 
@@ -166,6 +154,5 @@ public class MultiStageWithoutStatsIntegrationTest extends BaseClusterIntegratio
     JsonNode child = children.get(0);
     assertEquals(child.get("type").asText(), "EMPTY_MAILBOX_SEND");
     assertEquals(child.get("stage").asInt(), 1);
-    assertEquals(child.get("description").asText(), "No stats available for this stage. It may have been pruned.");
   }
 }

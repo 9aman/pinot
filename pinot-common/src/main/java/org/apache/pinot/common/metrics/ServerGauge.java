@@ -61,12 +61,14 @@ public enum ServerGauge implements AbstractMetrics.Gauge {
   SEGMENT_DOWNLOAD_THROTTLE_THRESHOLD("segmentDownloadThrottleThreshold", true),
   SEGMENT_ALL_PREPROCESS_THROTTLE_THRESHOLD("segmentAllPreprocessThrottleThreshold", true),
   SEGMENT_STARTREE_PREPROCESS_THROTTLE_THRESHOLD("segmentStartreePreprocessThreshold", true),
+  SEGMENT_MULTI_COL_TEXT_INDEX_PREPROCESS_THROTTLE_THRESHOLD("segmentMultiColTextIndexPreprocessThreshold", true),
   // Segment operation metrics - count is the current number of segments undergoing the given operation.
   // Incremented when the semaphore is acquired and decremented when the semaphore is released
   SEGMENT_TABLE_DOWNLOAD_COUNT("segmentTableDownloadCount", false),
   SEGMENT_DOWNLOAD_COUNT("segmentDownloadCount", true),
   SEGMENT_ALL_PREPROCESS_COUNT("segmentAllPreprocessCount", true),
   SEGMENT_STARTREE_PREPROCESS_COUNT("segmentStartreePreprocessCount", true),
+  SEGMENT_MULTI_COL_TEXT_INDEX_PREPROCESS_COUNT("segmentMultiColTextIndexPreprocessCount", true),
 
   /**
    * The size of the small cache.
@@ -97,7 +99,32 @@ public enum ServerGauge implements AbstractMetrics.Gauge {
   REALTIME_CONSUMER_DIR_USAGE("bytes", true),
   SEGMENT_DOWNLOAD_SPEED("bytes", true),
   PREDOWNLOAD_SPEED("bytes", true),
-  ZK_JUTE_MAX_BUFFER("zkJuteMaxBuffer", true);
+  ZK_JUTE_MAX_BUFFER("zkJuteMaxBuffer", true),
+
+  // gRPC Netty buffer metrics
+  GRPC_NETTY_POOLED_USED_DIRECT_MEMORY("bytes", true),
+  GRPC_NETTY_POOLED_USED_HEAP_MEMORY("bytes", true),
+  GRPC_NETTY_POOLED_ARENAS_DIRECT("arenas", true),
+  GRPC_NETTY_POOLED_ARENAS_HEAP("arenas", true),
+  GRPC_NETTY_POOLED_CACHE_SIZE_SMALL("bytes", true),
+  GRPC_NETTY_POOLED_CACHE_SIZE_NORMAL("bytes", true),
+  GRPC_NETTY_POOLED_THREADLOCALCACHE("bytes", true),
+  GRPC_NETTY_POOLED_CHUNK_SIZE("bytes", true),
+
+  // GrpcMailboxServer memory metrics
+  MAILBOX_SERVER_USED_DIRECT_MEMORY("bytes", true),
+  MAILBOX_SERVER_USED_HEAP_MEMORY("bytes", true),
+  MAILBOX_SERVER_ARENAS_DIRECT("arenas", true),
+  MAILBOX_SERVER_ARENAS_HEAP("arenas", true),
+  MAILBOX_SERVER_CACHE_SIZE_SMALL("bytes", true),
+  MAILBOX_SERVER_CACHE_SIZE_NORMAL("bytes", true),
+  MAILBOX_SERVER_THREADLOCALCACHE("bytes", true),
+  MAILBOX_SERVER_CHUNK_SIZE("bytes", true),
+
+  // how many message are there in the server's message queue in helix
+  HELIX_MESSAGES_COUNT("count", true),
+  STARTUP_STATUS_CHECK_IN_PROGRESS("state", true,
+      "Indicates whether the server startup status check is currently in progress");
 
   private final String _gaugeName;
   private final String _unit;

@@ -19,8 +19,8 @@
 package org.apache.pinot.segment.local.indexsegment.immutable;
 
 import com.google.common.base.Preconditions;
+import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
 import java.io.File;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -29,6 +29,7 @@ import org.apache.pinot.segment.local.segment.index.column.PhysicalColumnIndexCo
 import org.apache.pinot.segment.local.segment.index.converter.SegmentFormatConverterFactory;
 import org.apache.pinot.segment.local.segment.index.loader.IndexLoadingConfig;
 import org.apache.pinot.segment.local.segment.index.loader.SegmentPreProcessor;
+import org.apache.pinot.segment.local.segment.index.readers.text.MultiColumnLuceneTextIndexReader;
 import org.apache.pinot.segment.local.segment.virtualcolumn.VirtualColumnContext;
 import org.apache.pinot.segment.local.segment.virtualcolumn.VirtualColumnProvider;
 import org.apache.pinot.segment.local.segment.virtualcolumn.VirtualColumnProviderFactory;
@@ -256,7 +257,7 @@ public class ImmutableSegmentLoader {
     }
 
     SegmentDirectory.Reader segmentReader = segmentDirectory.createReader();
-    Map<String, ColumnIndexContainer> indexContainerMap = new HashMap<>();
+    Map<String, ColumnIndexContainer> indexContainerMap = new Object2ObjectOpenHashMap<>(columnMetadataMap.size());
     for (Map.Entry<String, ColumnMetadata> entry : columnMetadataMap.entrySet()) {
       // FIXME: text-index only works with local SegmentDirectory
       indexContainerMap.put(entry.getKey(),
@@ -283,8 +284,14 @@ public class ImmutableSegmentLoader {
       starTreeIndexContainer = new StarTreeIndexContainer(segmentReader, segmentMetadata, indexContainerMap);
     }
 
+    MultiColumnLuceneTextIndexReader mcTextReader = null;
+    if (segmentReader.hasMultiColumnTextIndex()) {
+      mcTextReader = new MultiColumnLuceneTextIndexReader(segmentMetadata);
+    }
+
     ImmutableSegmentImpl segment =
-        new ImmutableSegmentImpl(segmentDirectory, segmentMetadata, indexContainerMap, starTreeIndexContainer);
+        new ImmutableSegmentImpl(segmentDirectory, segmentMetadata, indexContainerMap, starTreeIndexContainer,
+            mcTextReader);
     LOGGER.info("Successfully loaded segment: {} with SegmentDirectory", segmentName);
     return segment;
   }

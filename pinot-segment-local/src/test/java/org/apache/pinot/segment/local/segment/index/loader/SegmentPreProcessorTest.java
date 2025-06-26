@@ -45,6 +45,7 @@ import org.apache.pinot.segment.local.segment.readers.GenericRowRecordReader;
 import org.apache.pinot.segment.local.segment.store.SegmentLocalFSDirectory;
 import org.apache.pinot.segment.local.utils.SegmentAllIndexPreprocessThrottler;
 import org.apache.pinot.segment.local.utils.SegmentDownloadThrottler;
+import org.apache.pinot.segment.local.utils.SegmentMultiColTextIndexPreprocessThrottler;
 import org.apache.pinot.segment.local.utils.SegmentOperationsThrottler;
 import org.apache.pinot.segment.local.utils.SegmentStarTreePreprocessThrottler;
 import org.apache.pinot.segment.spi.ColumnMetadata;
@@ -147,7 +148,8 @@ public class SegmentPreProcessorTest implements PinotBuffersAfterClassCheckRule 
 
   private static final SegmentOperationsThrottler SEGMENT_OPERATIONS_THROTTLER =
       new SegmentOperationsThrottler(new SegmentAllIndexPreprocessThrottler(2, 4, true),
-          new SegmentStarTreePreprocessThrottler(1, 2, true), new SegmentDownloadThrottler(2, 4, true));
+          new SegmentStarTreePreprocessThrottler(1, 2, true), new SegmentDownloadThrottler(2, 4, true),
+          new SegmentMultiColTextIndexPreprocessThrottler(1, 2, true));
 
   private final File _avroFile;
   private final Schema _schema;
@@ -463,8 +465,8 @@ public class SegmentPreProcessorTest implements PinotBuffersAfterClassCheckRule 
     validateIndex(StandardIndexes.range(), EXISTING_INT_COL_RAW, 42242, 16, false, false, false, 0, true, 0,
         ChunkCompressionType.LZ4, false, DataType.INT, 100000);
     long oldRangeIndexSize =
-        new SegmentMetadataImpl(INDEX_DIR).getColumnMetadataFor(EXISTING_INT_COL_RAW).getIndexSizeMap()
-            .get(StandardIndexes.range());
+        new SegmentMetadataImpl(INDEX_DIR).getColumnMetadataFor(EXISTING_INT_COL_RAW)
+            .getIndexSizeFor(StandardIndexes.range());
     // At this point, the segment has range index. Now the reload path should create a dictionary and rewrite the
     // range index.
     _noDictionaryColumns.remove(EXISTING_INT_COL_RAW);
@@ -473,8 +475,8 @@ public class SegmentPreProcessorTest implements PinotBuffersAfterClassCheckRule 
     validateIndex(StandardIndexes.range(), EXISTING_INT_COL_RAW, 42242, 16, false, true, false, 0, true, 0, null, false,
         DataType.INT, 100000);
     long newRangeIndexSize =
-        new SegmentMetadataImpl(INDEX_DIR).getColumnMetadataFor(EXISTING_INT_COL_RAW).getIndexSizeMap()
-            .get(StandardIndexes.range());
+        new SegmentMetadataImpl(INDEX_DIR).getColumnMetadataFor(EXISTING_INT_COL_RAW)
+            .getIndexSizeFor(StandardIndexes.range());
     assertNotEquals(oldRangeIndexSize, newRangeIndexSize);
   }
 
@@ -557,15 +559,15 @@ public class SegmentPreProcessorTest implements PinotBuffersAfterClassCheckRule 
         DataType.INT, 100000);
     validateIndex(StandardIndexes.range(), COLUMN10_NAME, 3960, 12, false, true, false, 0, true, 0, null, false,
         DataType.INT, 100000);
-    long oldRangeIndexSize = new SegmentMetadataImpl(INDEX_DIR).getColumnMetadataFor(COLUMN10_NAME).getIndexSizeMap()
-        .get(StandardIndexes.range());
+    long oldRangeIndexSize =
+        new SegmentMetadataImpl(INDEX_DIR).getColumnMetadataFor(COLUMN10_NAME).getIndexSizeFor(StandardIndexes.range());
     _noDictionaryColumns.add(COLUMN10_NAME);
     checkForwardIndexCreation(COLUMN10_NAME, 3960, 12, _schema, false, false, false, 0, ChunkCompressionType.LZ4, true,
         0, DataType.INT, 100000);
     validateIndex(StandardIndexes.range(), COLUMN10_NAME, 3960, 12, false, false, false, 0, true, 0,
         ChunkCompressionType.LZ4, false, DataType.INT, 100000);
-    long newRangeIndexSize = new SegmentMetadataImpl(INDEX_DIR).getColumnMetadataFor(COLUMN10_NAME).getIndexSizeMap()
-        .get(StandardIndexes.range());
+    long newRangeIndexSize =
+        new SegmentMetadataImpl(INDEX_DIR).getColumnMetadataFor(COLUMN10_NAME).getIndexSizeFor(StandardIndexes.range());
     assertNotEquals(oldRangeIndexSize, newRangeIndexSize);
 
     // TEST4: Disable dictionary but add text index.

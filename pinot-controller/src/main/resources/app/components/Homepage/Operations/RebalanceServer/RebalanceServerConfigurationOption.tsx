@@ -27,16 +27,29 @@ import {
 import {
     RebalanceServerConfigurationOptionSelect
 } from "./RebalanceServerConfigurationOptions/RebalanceServerConfigurationOptionSelect";
+import {
+    RebalanceServerConfigurationOptionDouble
+} from "./RebalanceServerConfigurationOptions/RebalanceServerConfigurationOptionDouble";
 
 export const RebalanceServerConfigurationOption = (
-    { option, handleConfigChange }: { option: RebalanceServerOption, handleConfigChange: (config: { [key: string]: string | number | boolean }) => void }) => {
+    {
+        option,
+        handleConfigChange,
+        rebalanceConfig
+    }: {
+        option: RebalanceServerOption,
+        handleConfigChange: (config: { [key: string]: string | number | boolean }) => void
+        rebalanceConfig: { [optionName: string]: string | boolean | number },
+    }) => {
     switch (option.type) {
         case "BOOL":
-            return <RebalanceServerConfigurationOptionSwitch option={option} handleConfigChange={handleConfigChange} />;
+            return <RebalanceServerConfigurationOptionSwitch rebalanceConfig={rebalanceConfig} option={option} handleConfigChange={handleConfigChange} />;
         case "INTEGER":
-            return <RebalanceServerConfigurationOptionInteger option={option} handleConfigChange={handleConfigChange} />;
+            return <RebalanceServerConfigurationOptionInteger rebalanceConfig={rebalanceConfig} option={option} handleConfigChange={handleConfigChange} />;
         case "SELECT":
-            return <RebalanceServerConfigurationOptionSelect option={option} handleConfigChange={handleConfigChange} />;
+            return <RebalanceServerConfigurationOptionSelect rebalanceConfig={rebalanceConfig} option={option} handleConfigChange={handleConfigChange} />;
+        case "DOUBLE":
+            return <RebalanceServerConfigurationOptionDouble rebalanceConfig={rebalanceConfig} option={option} handleConfigChange={handleConfigChange} />;
         default:
             return null;
     }

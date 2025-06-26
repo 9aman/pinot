@@ -18,10 +18,15 @@
  */
 package org.apache.pinot.spi.exception;
 
+import java.util.EnumMap;
+import java.util.Map;
+import javax.annotation.Nonnegative;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-
+/// The error codes used by Pinot queries.
+///
+/// When updated, remember to update Query.tsx in pinot-ui as well.
 public enum QueryErrorCode {
   /// Request in JSON format is incorrect. For example, doesn't contain the expected 'sql' field.
   JSON_PARSING(100, "JsonParsingError"),
@@ -70,6 +75,7 @@ public enum QueryErrorCode {
       BY_ID[queryErrorCode.getId()] = queryErrorCode;
     }
   }
+  @Nonnegative
   private final int _id;
   private final String _defaultMessage;
 
@@ -103,6 +109,17 @@ public enum QueryErrorCode {
       return UNKNOWN;
     }
     return queryErrorCode;
+  }
+
+  public static <T> Map<QueryErrorCode, T> fromKeyMap(Map<Integer, T> originalMap) {
+    EnumMap<QueryErrorCode, T> newMap = new EnumMap<>(QueryErrorCode.class);
+    for (Map.Entry<Integer, T> entry : originalMap.entrySet()) {
+      if (entry.getKey() < 0) {
+        continue;
+      }
+      newMap.put(QueryErrorCode.fromErrorCode(entry.getKey()), entry.getValue());
+    }
+    return newMap;
   }
 
   public QueryException asException() {

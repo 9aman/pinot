@@ -51,6 +51,24 @@ public class BrokerMeter implements AbstractMetrics.Meter {
    */
   public static final BrokerMeter QUERIES_GLOBAL = create("QUERIES_GLOBAL", "queries", true);
   /**
+   * Number of queries executed per pool.
+   * <p>
+   * This metric is used to monitor query traffic distribution across pool.
+   * Currently only includes single-stage queries.
+   */
+  public static final BrokerMeter POOL_QUERIES = create("POOL_QUERIES", "routing", false);
+  /**
+   * Number of segment selected per pool during query execution.
+   * <p>
+   * This metric is not global and is attached to a particular pool.
+   * Currently this counter include single stage queries only.
+   * <p>
+   * Let's say the query option orderedReferredPools is set and a few nodes in the preferred pool are down.
+   * The other metric {@link #POOL_QUERIES} shows the traffic are relatively equal over pool.
+   * This metric is still going to show that most of segments are still selected from the preferred pool.
+   */
+  public static final BrokerMeter POOL_SEG_QUERIES = create("POOL_SEG_QUERIES", "routing", false);
+  /**
    * Number of multi-stage queries that have been started.
    * <p>
    * Unlike {@link #MULTI_STAGE_QUERIES}, this metric is global and not attached to a particular table.
@@ -203,6 +221,14 @@ public class BrokerMeter implements AbstractMetrics.Meter {
    * query.
    */
   public static final BrokerMeter WINDOW_COUNT = create("WINDOW_COUNT", "queries", true);
+
+  /**
+   * How many MSE queries have encountered segments with invalid partitions.
+   * <p>
+   * This is only emitted for when usePhysicalOptimizer is set to true.
+   */
+  public static final BrokerMeter INVALID_SEGMENT_PARTITION_IN_QUERY = create("INVALID_SEGMENT_PARTITION_IN_QUERY",
+      "queries", false);
 
   /**
    * Number of queries executed with cursors. This count includes queries that use SSE and MSE

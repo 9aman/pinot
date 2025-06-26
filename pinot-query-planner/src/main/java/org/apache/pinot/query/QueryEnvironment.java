@@ -19,12 +19,12 @@
 package org.apache.pinot.query;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import java.io.Closeable;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import javax.annotation.Nullable;
@@ -54,6 +54,9 @@ import org.apache.calcite.sql2rel.SqlToRelConverter;
 import org.apache.calcite.tools.FrameworkConfig;
 import org.apache.calcite.tools.Frameworks;
 import org.apache.calcite.tools.RelBuilder;
+import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections.MapUtils;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.calcite.rel.rules.PinotImplicitTableHintRule;
 import org.apache.pinot.calcite.rel.rules.PinotJoinToDynamicBroadcastRule;
 import org.apache.pinot.calcite.rel.rules.PinotQueryRuleSets;
@@ -61,9 +64,11 @@ import org.apache.pinot.calcite.rel.rules.PinotRelDistributionTraitRule;
 import org.apache.pinot.calcite.rel.rules.PinotRuleUtils;
 import org.apache.pinot.calcite.sql.fun.PinotOperatorTable;
 import org.apache.pinot.calcite.sql2rel.PinotConvertletTable;
+import org.apache.pinot.common.catalog.PinotCatalogReader;
 import org.apache.pinot.common.config.provider.TableCache;
 import org.apache.pinot.common.utils.config.QueryOptionsUtils;
 import org.apache.pinot.query.catalog.PinotCatalog;
+import org.apache.pinot.query.context.PhysicalPlannerContext;
 import org.apache.pinot.query.context.PlannerContext;
 import org.apache.pinot.query.context.RuleTimingPlannerListener;
 import org.apache.pinot.query.planner.PlannerUtils;
@@ -76,6 +81,10 @@ import org.apache.pinot.query.planner.logical.RelToPlanNodeConverter;
 import org.apache.pinot.query.planner.logical.TransformationTracker;
 import org.apache.pinot.query.planner.physical.DispatchableSubPlan;
 import org.apache.pinot.query.planner.physical.PinotDispatchPlanner;
+import org.apache.pinot.query.planner.physical.v2.PRelNode;
+import org.apache.pinot.query.planner.physical.v2.PRelNodeTreeValidator;
+import org.apache.pinot.query.planner.physical.v2.PlanFragmentAndMailboxAssignment;
+import org.apache.pinot.query.planner.physical.v2.RelToPRelConverter;
 import org.apache.pinot.query.planner.plannode.PlanNode;
 import org.apache.pinot.query.routing.WorkerManager;
 import org.apache.pinot.query.type.TypeFactory;
@@ -111,7 +120,20 @@ import org.slf4j.LoggerFactory;
 // make sure there is a worker manager when executing queries.
 @Value.Enclosing
 public class QueryEnvironment {
+  private static final CalciteConnectionConfig CONNECTION_CONFIG;
   private static final Logger LOGGER = LoggerFactory.getLogger(QueryEnvironment.class);
+
+  static {
+    // We set Calcite configuration as case-sensitive at all timesk, even when Pinot is configured as case-insensitive.
+    // This is because Calcite is way too invasive when configured as case-insensitive and doing so leads to all
+    // identifiers being transformed to lower-case after the compilation and validation stage, which is cumbersome for
+    // further processing of the query.
+    // Instead of configuring Calcite as case-insensitive, we force the case-insensitive behavior in specific places
+    // such as [DispatchablePlanVisitor.visitTableScan] and [PinotNameMatcher] used by [PinotCatalogReader].
+    Properties connectionConfigProperties = new Properties();
+    connectionConfigProperties.setProperty(CalciteConnectionProperty.CASE_SENSITIVE.camelName(), "true");
+    CONNECTION_CONFIG = new CalciteConnectionConfigImpl(connectionConfigProperties);
+  }
 
   private final TypeFactory _typeFactory = new TypeFactory();
   private final FrameworkConfig _config;
@@ -125,20 +147,17 @@ public class QueryEnvironment {
     String database = config.getDatabase();
     _catalog = new PinotCatalog(config.getTableCache(), database);
     CalciteSchema rootSchema = CalciteSchema.createRootSchema(false, false, database, _catalog);
-    Properties connectionConfigProperties = new Properties();
-    connectionConfigProperties.setProperty(CalciteConnectionProperty.CASE_SENSITIVE.camelName(), Boolean.toString(
-        config.getTableCache() == null
-            ? !CommonConstants.Helix.DEFAULT_ENABLE_CASE_INSENSITIVE
-            : !config.getTableCache().isIgnoreCase()));
-    CalciteConnectionConfig connectionConfig = new CalciteConnectionConfigImpl(connectionConfigProperties);
     _config = Frameworks.newConfigBuilder().traitDefs().operatorTable(PinotOperatorTable.instance())
         .defaultSchema(rootSchema.plus()).sqlToRelConverterConfig(PinotRuleUtils.PINOT_SQL_TO_REL_CONFIG).build();
-    _catalogReader = new CalciteCatalogReader(rootSchema, List.of(database), _typeFactory, connectionConfig);
-    _optProgram = getOptProgram();
+    _catalogReader = new PinotCatalogReader(
+        rootSchema, List.of(database), _typeFactory, CONNECTION_CONFIG, config.isCaseSensitive());
+    // default optProgram with no skip rule options
+    _optProgram = getOptProgram(null);
   }
 
   public QueryEnvironment(String database, TableCache tableCache, @Nullable WorkerManager workerManager) {
     this(configBuilder()
+        .requestId(-1L)
         .database(database)
         .tableCache(tableCache)
         .workerManager(workerManager)
@@ -150,7 +169,17 @@ public class QueryEnvironment {
    */
   private PlannerContext getPlannerContext(SqlNodeAndOptions sqlNodeAndOptions) {
     WorkerManager workerManager = getWorkerManager(sqlNodeAndOptions);
-    HepProgram traitProgram = getTraitProgram(workerManager, _envConfig);
+    Map<String, String> options = sqlNodeAndOptions.getOptions();
+    HepProgram optProgram = _optProgram;
+    if (MapUtils.isNotEmpty(options)) {
+      Set<String> skipRuleSet = QueryOptionsUtils.getSkipPlannerRules(options);
+      if (CollectionUtils.isNotEmpty(skipRuleSet)) {
+        // dynamically create optProgram according to rule options
+        optProgram = getOptProgram(skipRuleSet);
+      }
+    }
+    boolean usePhysicalOptimizer = QueryOptionsUtils.isUsePhysicalOptimizer(sqlNodeAndOptions.getOptions());
+    HepProgram traitProgram = getTraitProgram(workerManager, _envConfig, usePhysicalOptimizer);
     SqlExplainFormat format = SqlExplainFormat.DOT;
     if (sqlNodeAndOptions.getSqlNode().getKind().equals(SqlKind.EXPLAIN)) {
       SqlExplain explain = (SqlExplain) sqlNodeAndOptions.getSqlNode();
@@ -158,8 +187,15 @@ public class QueryEnvironment {
         format = explain.getFormat();
       }
     }
-    return new PlannerContext(_config, _catalogReader, _typeFactory, _optProgram, traitProgram,
-        sqlNodeAndOptions.getOptions(), _envConfig, format);
+    PhysicalPlannerContext physicalPlannerContext = null;
+    if (usePhysicalOptimizer && _envConfig.getWorkerManager() != null) {
+      workerManager = _envConfig.getWorkerManager();
+      physicalPlannerContext = new PhysicalPlannerContext(workerManager.getRoutingManager(),
+          workerManager.getHostName(), workerManager.getPort(), _envConfig.getRequestId(),
+          workerManager.getInstanceId(), sqlNodeAndOptions.getOptions());
+    }
+    return new PlannerContext(_config, _catalogReader, _typeFactory, optProgram, traitProgram,
+        sqlNodeAndOptions.getOptions(), _envConfig, format, physicalPlannerContext);
   }
 
   /// @deprecated Use [#compile] and then [plan][CompiledQuery#planQuery(long)] the returned query instead
@@ -182,9 +218,6 @@ public class QueryEnvironment {
     }
     switch (inferPartitionHint.toLowerCase()) {
       case "true":
-        Objects.requireNonNull(workerManager, "WorkerManager is required in order to infer partition hint. "
-            + "Please enable it using broker config"
-            + CommonConstants.Broker.CONFIG_OF_ENABLE_PARTITION_METADATA_MANAGER + "=true");
         return workerManager;
       case "false":
         return null;
@@ -313,6 +346,12 @@ public class QueryEnvironment {
     SqlNode validated = validate(sqlNode, plannerContext);
     RelRoot relation = toRelation(validated, plannerContext);
     RelNode optimized = optimize(relation, plannerContext);
+    if (plannerContext.isUsePhysicalOptimizer()) {
+      Preconditions.checkNotNull(plannerContext.getPhysicalPlannerContext(), "Physical planner context is null");
+      optimized = RelToPRelConverter.toPRelNode(optimized, plannerContext.getPhysicalPlannerContext(),
+          _envConfig.getTableCache()).unwrap();
+      PRelNodeTreeValidator.validate((PRelNode) optimized);
+    }
     return relation.withRel(optimized);
   }
 
@@ -419,16 +458,24 @@ public class QueryEnvironment {
     }
   }
 
-  private DispatchableSubPlan toDispatchableSubPlan(RelRoot relRoot, PlannerContext plannerContext, long requestId) {
-    return toDispatchableSubPlan(relRoot, plannerContext, requestId, null);
+  private DispatchableSubPlan toDispatchableSubPlan(RelRoot relRoot, PlannerContext plannerContext) {
+    return toDispatchableSubPlan(relRoot, plannerContext, null);
   }
 
-  private DispatchableSubPlan toDispatchableSubPlan(RelRoot relRoot, PlannerContext plannerContext, long requestId,
+  private DispatchableSubPlan toDispatchableSubPlan(RelRoot relRoot, PlannerContext plannerContext,
       @Nullable TransformationTracker.Builder<PlanNode, RelNode> tracker) {
-    SubPlan plan = PinotLogicalQueryPlanner.makePlan(relRoot, tracker,
-        _envConfig.getTableCache(), useSpools(plannerContext.getOptions()));
+    long requestId = _envConfig.getRequestId();
+    if (plannerContext.isUsePhysicalOptimizer()) {
+      Pair<SubPlan, PlanFragmentAndMailboxAssignment.Result> plan = PinotLogicalQueryPlanner.makePlanV2(relRoot,
+          plannerContext.getPhysicalPlannerContext());
+      PinotDispatchPlanner pinotDispatchPlanner = new PinotDispatchPlanner(plannerContext,
+          _envConfig.getWorkerManager(), requestId, _envConfig.getTableCache());
+      return pinotDispatchPlanner.createDispatchableSubPlanV2(plan.getLeft(), plan.getRight());
+    }
+    SubPlan plan = PinotLogicalQueryPlanner.makePlan(relRoot, tracker, useSpools(plannerContext.getOptions()));
     PinotDispatchPlanner pinotDispatchPlanner =
-        new PinotDispatchPlanner(plannerContext, _envConfig.getWorkerManager(), requestId, _envConfig.getTableCache());
+        new PinotDispatchPlanner(plannerContext, _envConfig.getWorkerManager(), _envConfig.getRequestId(),
+            _envConfig.getTableCache());
     return pinotDispatchPlanner.createDispatchableSubPlan(plan);
   }
 
@@ -436,37 +483,104 @@ public class QueryEnvironment {
   // utils
   // --------------------------------------------------------------------------
 
-  private static HepProgram getOptProgram() {
+  /**
+   * Creates and returns a HepProgram that performs mostly logical transformations.
+   * It performs several phases of rule application over the parsed decorrelated trimmed plan:
+   * - In the first phase, it prunes the applies BASIC_RULES that are almost always helpful to simplify logical plan
+   * - In the second phase, it performs predicate pushdown -> projection pushdown -> predicate pushdown.
+   * - In the third phase, the logical plan is prune with PRUNE_RULES.
+   *
+   * @param skipRuleSet parsed skipped rule name set from query options
+   * @return HepProgram that performs logical transformations
+   */
+  private static HepProgram getOptProgram(@Nullable Set<String> skipRuleSet) {
     HepProgramBuilder hepProgramBuilder = new HepProgramBuilder();
     // Set the match order as DEPTH_FIRST. The default is arbitrary which works the same as DEPTH_FIRST, but it's
     // best to be explicit.
     hepProgramBuilder.addMatchOrder(HepMatchOrder.DEPTH_FIRST);
 
     // ----
+    // Rules are disabled if its corresponding value is set to false in ruleFlags
+    // construct filtered BASIC_RULES, FILTER_PUSHDOWN_RULES, PROJECT_PUSHDOWN_RULES, PRUNE_RULES
+    List<RelOptRule> basicRules;
+    List<RelOptRule> filterPushdownRules;
+    List<RelOptRule> projectPushdownRules;
+    List<RelOptRule> pruneRules;
+    if (skipRuleSet == null) {
+      basicRules = PinotQueryRuleSets.BASIC_RULES;
+      filterPushdownRules = PinotQueryRuleSets.FILTER_PUSHDOWN_RULES;
+      projectPushdownRules = PinotQueryRuleSets.PROJECT_PUSHDOWN_RULES;
+      pruneRules = PinotQueryRuleSets.PRUNE_RULES;
+    } else {
+      basicRules = filterRuleList(PinotQueryRuleSets.BASIC_RULES, skipRuleSet);
+      filterPushdownRules = filterRuleList(PinotQueryRuleSets.FILTER_PUSHDOWN_RULES, skipRuleSet);
+      projectPushdownRules = filterRuleList(PinotQueryRuleSets.PROJECT_PUSHDOWN_RULES, skipRuleSet);
+      pruneRules = filterRuleList(PinotQueryRuleSets.PRUNE_RULES, skipRuleSet);
+    }
+
+
     // Run the Calcite CORE rules using 1 HepInstruction per rule. We use 1 HepInstruction per rule for simplicity:
     // the rules used here can rest assured that they are the only ones evaluated in a dedicated graph-traversal.
-    for (RelOptRule relOptRule : PinotQueryRuleSets.BASIC_RULES) {
-      hepProgramBuilder.addRuleInstance(relOptRule);
+    for (RelOptRule relOptRule : basicRules) {
+        hepProgramBuilder.addRuleInstance(relOptRule);
     }
 
     // ----
     // Pushdown filters using a single HepInstruction.
-    hepProgramBuilder.addRuleCollection(PinotQueryRuleSets.FILTER_PUSHDOWN_RULES);
+    hepProgramBuilder.addRuleCollection(filterPushdownRules);
 
     // Pushdown projects after first filter pushdown to minimize projected columns.
-    hepProgramBuilder.addRuleCollection(PinotQueryRuleSets.PROJECT_PUSHDOWN_RULES);
+    hepProgramBuilder.addRuleCollection(projectPushdownRules);
 
     // Pushdown filters again since filter should be pushed down at the lowest level, after project pushdown.
-    hepProgramBuilder.addRuleCollection(PinotQueryRuleSets.FILTER_PUSHDOWN_RULES);
+    hepProgramBuilder.addRuleCollection(filterPushdownRules);
 
     // ----
     // Prune duplicate/unnecessary nodes using a single HepInstruction.
     // TODO: We can consider using HepMatchOrder.TOP_DOWN if we find cases where it would help.
-    hepProgramBuilder.addRuleCollection(PinotQueryRuleSets.PRUNE_RULES);
+    hepProgramBuilder.addRuleCollection(pruneRules);
     return hepProgramBuilder.build();
   }
 
-  private static HepProgram getTraitProgram(@Nullable WorkerManager workerManager, Config config) {
+  // util func to check no rules are skipped
+  private static boolean noRulesSkipped(Set<String> set) {
+    return set.isEmpty();
+  }
+
+  /**
+   * Filter static RuleSet according to query options
+   * The filtering is done via checking query option with
+   * key returning from {@link CommonConstants.Broker}.skipRule(rule description).
+   *
+   * @param rules static list of rules
+   * @param skipRuleSet skip rule set from options
+   * @return filtered list of rules
+   */
+  private static List<RelOptRule> filterRuleList(List<RelOptRule> rules, Set<String> skipRuleSet) {
+    List<RelOptRule> filteredRules = new ArrayList<>();
+    for (RelOptRule relOptRule : rules) {
+      String ruleName = relOptRule.toString();
+      if (isRuleSkipped(ruleName, skipRuleSet)) {
+        continue;
+      }
+      filteredRules.add(relOptRule);
+    }
+    return filteredRules;
+  }
+
+  /**
+   * Whether a rule is skipped, rules not skipped by default
+   * @param ruleName description of the rule
+   * @param skipRuleSet query skipSet
+   * @return false if corresponding key is not in skipMap or the value is "false", else true
+   */
+  private static boolean isRuleSkipped(String ruleName, Set<String> skipRuleSet) {
+    // can put rule-specific default behavior here
+    return skipRuleSet.contains(ruleName);
+  }
+
+  private static HepProgram getTraitProgram(@Nullable WorkerManager workerManager, Config config,
+      boolean usePhysicalOptimizer) {
     HepProgramBuilder hepProgramBuilder = new HepProgramBuilder();
 
     // Set the match order as BOTTOM_UP.
@@ -474,18 +588,26 @@ public class QueryEnvironment {
 
     // ----
     // Run pinot specific rules that should run after all other rules, using 1 HepInstruction per rule.
-    for (RelOptRule relOptRule : PinotQueryRuleSets.PINOT_POST_RULES) {
-      if (isEligibleQueryPostRule(relOptRule, config)) {
-        hepProgramBuilder.addRuleInstance(relOptRule);
+    if (!usePhysicalOptimizer) {
+      for (RelOptRule relOptRule : PinotQueryRuleSets.PINOT_POST_RULES) {
+        if (isEligibleQueryPostRule(relOptRule, config)) {
+          hepProgramBuilder.addRuleInstance(relOptRule);
+        }
+      }
+    } else {
+      for (RelOptRule relOptRule : PinotQueryRuleSets.PINOT_POST_RULES_V2) {
+        if (isEligibleQueryPostRule(relOptRule, config)) {
+          hepProgramBuilder.addRuleInstance(relOptRule);
+        }
       }
     }
-
-    // apply RelDistribution trait to all nodes
-    if (workerManager != null) {
-      hepProgramBuilder.addRuleInstance(PinotImplicitTableHintRule.withWorkerManager(workerManager));
+    if (!usePhysicalOptimizer) {
+      // apply RelDistribution trait to all nodes
+      if (workerManager != null) {
+        hepProgramBuilder.addRuleInstance(PinotImplicitTableHintRule.withWorkerManager(workerManager));
+      }
+      hepProgramBuilder.addRuleInstance(PinotRelDistributionTraitRule.INSTANCE);
     }
-    hepProgramBuilder.addRuleInstance(PinotRelDistributionTraitRule.INSTANCE);
-
     return hepProgramBuilder.build();
   }
 
@@ -511,6 +633,9 @@ public class QueryEnvironment {
 
   @Value.Immutable
   public interface Config {
+
+    long getRequestId();
+
     String getDatabase();
 
     /**
@@ -518,6 +643,14 @@ public class QueryEnvironment {
      */
     @Nullable
     TableCache getTableCache();
+
+    /**
+     * Whether the schema should be considered case-insensitive.
+     */
+    @Value.Default
+    default boolean isCaseSensitive() {
+      return !CommonConstants.Helix.DEFAULT_ENABLE_CASE_INSENSITIVE;
+    }
 
     /**
      * Whether to apply partition hint by default or not.
@@ -541,6 +674,13 @@ public class QueryEnvironment {
     @Value.Default
     default boolean defaultUseSpools() {
       return CommonConstants.Broker.DEFAULT_OF_SPOOLS;
+    }
+
+    /// Whether to only use servers for leaf stages as the workers for the intermediate stages.
+    /// This is useful to control the fanout of the query and reduce data shuffling.
+    @Value.Default
+    default boolean defaultUseLeafServerForIntermediateStage() {
+      return CommonConstants.Broker.DEFAULT_USE_LEAF_SERVER_FOR_INTERMEDIATE_STAGE;
     }
 
 
@@ -602,6 +742,10 @@ public class QueryEnvironment {
       return _sqlNodeAndOptions.getSqlNode().getKind().equals(SqlKind.EXPLAIN);
     }
 
+    public PlannerContext getPlannerContext() {
+      return _plannerContext;
+    }
+
     /// Explain the query plan.
     /// The original query must be an EXPLAIN query and way it will be explained depends on the options of the EXPLAIN
     /// query and the [QueryEnvironment.Config] used to create the [QueryEnvironment] that compiled this query.
@@ -613,7 +757,7 @@ public class QueryEnvironment {
         SqlExplainFormat format = _plannerContext.getSqlExplainFormat();
         if (explain instanceof SqlPhysicalExplain) {
           // get the physical plan for query.
-          DispatchableSubPlan dispatchableSubPlan = toDispatchableSubPlan(_relRoot, _plannerContext, requestId);
+          DispatchableSubPlan dispatchableSubPlan = toDispatchableSubPlan(_relRoot, _plannerContext);
           return getQueryPlannerResult(_plannerContext, dispatchableSubPlan,
               PhysicalExplainPlanVisitor.explain(dispatchableSubPlan), dispatchableSubPlan.getTableNames());
         } else {
@@ -633,7 +777,7 @@ public class QueryEnvironment {
                 new TransformationTracker.ByIdentity.Builder<>();
             // Transform RelNodes into DispatchableSubPlan
             DispatchableSubPlan dispatchableSubPlan =
-                toDispatchableSubPlan(_relRoot, _plannerContext, requestId, nodeTracker);
+                toDispatchableSubPlan(_relRoot, _plannerContext, nodeTracker);
 
             AskingServerStageExplainer serversExplainer = new AskingServerStageExplainer(
                 onServerExplainer, explainPlanVerbose, RelBuilder.create(_config));
@@ -656,7 +800,7 @@ public class QueryEnvironment {
         // TODO: current code only assume one SubPlan per query, but we should support multiple SubPlans per query.
         // Each SubPlan should be able to run independently from Broker then set the results into the dependent
         // SubPlan for further processing.
-        DispatchableSubPlan dispatchableSubPlan = toDispatchableSubPlan(_relRoot, _plannerContext, requestId);
+        DispatchableSubPlan dispatchableSubPlan = toDispatchableSubPlan(_relRoot, _plannerContext);
         return getQueryPlannerResult(_plannerContext, dispatchableSubPlan, null, dispatchableSubPlan.getTableNames());
       } catch (QueryException e) {
         throw e;

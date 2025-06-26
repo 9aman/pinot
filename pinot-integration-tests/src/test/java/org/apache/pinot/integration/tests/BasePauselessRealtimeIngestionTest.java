@@ -50,7 +50,7 @@ import org.testng.annotations.BeforeClass;
 import static org.testng.Assert.assertTrue;
 
 
-public abstract class BasePauselessRealtimeIngestionTest extends BaseClusterIntegrationTest {
+public abstract class BasePauselessRealtimeIngestionTest extends BaseClusterIntegrationTestSet {
   protected static final int NUM_REALTIME_SEGMENTS = 48;
   protected static final long DEFAULT_COUNT_STAR_RESULT = 115545L;
   protected static final String DEFAULT_TABLE_NAME_2 = DEFAULT_TABLE_NAME + "_2";
@@ -82,12 +82,6 @@ public abstract class BasePauselessRealtimeIngestionTest extends BaseClusterInte
   }
 
   @Override
-  protected void overrideBrokerConf(PinotConfiguration brokerConf) {
-    super.overrideBrokerConf(brokerConf);
-    brokerConf.setProperty(CommonConstants.Broker.USE_MSE_TO_FILL_EMPTY_RESPONSE_SCHEMA, true);
-  }
-
-  @Override
   protected void overrideServerConf(PinotConfiguration serverConf) {
     try {
       LOGGER.info("Set segment.store.uri: {} for server with scheme: {}", _controllerConfig.getDataDir(),
@@ -116,7 +110,7 @@ public abstract class BasePauselessRealtimeIngestionTest extends BaseClusterInte
     waitForAllDocsLoaded(600_000L);
   }
 
-  private void setupNonPauselessTable()
+  protected void setupNonPauselessTable()
       throws Exception {
     _avroFiles = unpackAvroData(_tempDir);
     startKafka();
@@ -140,7 +134,7 @@ public abstract class BasePauselessRealtimeIngestionTest extends BaseClusterInte
     }, 1000, 100000, "Some segments still have missing url");
   }
 
-  private void setupPauselessTable()
+  protected void setupPauselessTable()
       throws Exception {
     Schema schema = createSchema();
     schema.setSchemaName(DEFAULT_TABLE_NAME);
@@ -160,7 +154,7 @@ public abstract class BasePauselessRealtimeIngestionTest extends BaseClusterInte
     addTableConfig(tableConfig);
   }
 
-  private void setMaxSegmentCompletionTimeMillis() {
+  protected void setMaxSegmentCompletionTimeMillis() {
     PinotLLCRealtimeSegmentManager realtimeSegmentManager = _helixResourceManager.getRealtimeSegmentManager();
     if (realtimeSegmentManager instanceof FailureInjectingPinotLLCRealtimeSegmentManager) {
       ((FailureInjectingPinotLLCRealtimeSegmentManager) realtimeSegmentManager)

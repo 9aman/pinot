@@ -72,6 +72,7 @@ import org.apache.pinot.segment.local.indexsegment.immutable.ImmutableSegmentLoa
 import org.apache.pinot.segment.local.segment.index.dictionary.DictionaryIndexType;
 import org.apache.pinot.segment.local.segment.index.loader.IndexLoadingConfig;
 import org.apache.pinot.segment.local.segment.index.loader.LoaderUtils;
+import org.apache.pinot.segment.local.segment.index.loader.invertedindex.MultiColumnTextIndexHandler;
 import org.apache.pinot.segment.local.startree.StarTreeBuilderUtils;
 import org.apache.pinot.segment.local.startree.v2.builder.StarTreeV2BuilderConfig;
 import org.apache.pinot.segment.local.utils.SegmentDownloadThrottler;
@@ -88,6 +89,7 @@ import org.apache.pinot.segment.spi.index.FieldIndexConfigs;
 import org.apache.pinot.segment.spi.index.FieldIndexConfigsUtil;
 import org.apache.pinot.segment.spi.index.StandardIndexes;
 import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
+import org.apache.pinot.segment.spi.index.multicolumntext.MultiColumnTextMetadata;
 import org.apache.pinot.segment.spi.index.startree.StarTreeV2;
 import org.apache.pinot.segment.spi.loader.SegmentDirectoryLoader;
 import org.apache.pinot.segment.spi.loader.SegmentDirectoryLoaderContext;
@@ -97,6 +99,7 @@ import org.apache.pinot.segment.spi.store.SegmentDirectory;
 import org.apache.pinot.spi.auth.AuthProvider;
 import org.apache.pinot.spi.config.instance.InstanceDataManagerConfig;
 import org.apache.pinot.spi.config.table.ColumnPartitionConfig;
+import org.apache.pinot.spi.config.table.MultiColumnTextIndexConfig;
 import org.apache.pinot.spi.config.table.SegmentPartitionConfig;
 import org.apache.pinot.spi.config.table.StarTreeIndexConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
@@ -146,8 +149,8 @@ public abstract class BaseTableDataManager implements TableDataManager {
   // Cache used for identifying segments which could not be acquired since they were recently deleted.
   protected Cache<String, String> _recentlyDeletedSegments;
 
-  // Caches the latest IndexLoadingConfig. The cached IndexLoadingConfig should not be modified.
-  protected volatile IndexLoadingConfig _indexLoadingConfig;
+  // Caches the latest TableConfig and Schema pair. The cache should not be modified.
+  protected volatile Pair<TableConfig, Schema> _cachedTableConfigAndSchema;
 
   protected volatile boolean _shutDown;
 
@@ -190,6 +193,7 @@ public abstract class BaseTableDataManager implements TableDataManager {
         .maximumSize(instanceDataManagerConfig.getDeletedSegmentsCacheSize())
         .expireAfterWrite(instanceDataManagerConfig.getDeletedSegmentsCacheTtlMinutes(), TimeUnit.MINUTES)
         .build();
+    _cachedTableConfigAndSchema = Pair.of(tableConfig, schema);
 
     _peerDownloadScheme = tableConfig.getValidationConfig().getPeerSegmentDownloadScheme();
     if (_peerDownloadScheme == null) {
@@ -226,7 +230,6 @@ public abstract class BaseTableDataManager implements TableDataManager {
       _numSegmentsAcquiredDownloadSemaphore = null;
     }
     _logger = LoggerFactory.getLogger(_tableNameWithType + "-" + getClass().getSimpleName());
-    createAndCacheIndexLoadingConfig(tableConfig, schema);
 
     doInit();
 
@@ -324,7 +327,7 @@ public abstract class BaseTableDataManager implements TableDataManager {
    * @param immutableSegment Immutable segment to add
    */
   @Override
-  public void addSegment(ImmutableSegment immutableSegment) {
+  public void addSegment(ImmutableSegment immutableSegment, @Nullable SegmentZKMetadata zkMetadata) {
     String segmentName = immutableSegment.getSegmentName();
     Preconditions.checkState(!_shutDown, "Table data manager is already shut down, cannot add segment: %s to table: %s",
         segmentName, _tableNameWithType);
@@ -387,19 +390,15 @@ public abstract class BaseTableDataManager implements TableDataManager {
     Preconditions.checkState(tableConfig != null, "Failed to find table config for table: %s", _tableNameWithType);
     Schema schema = ZKMetadataProvider.getTableSchema(_propertyStore, _tableNameWithType);
     Preconditions.checkState(schema != null, "Failed to find schema for table: %s", _tableNameWithType);
-    return createAndCacheIndexLoadingConfig(tableConfig, schema);
-  }
-
-  private IndexLoadingConfig createAndCacheIndexLoadingConfig(TableConfig tableConfig, Schema schema) {
     IndexLoadingConfig indexLoadingConfig = new IndexLoadingConfig(_instanceDataManagerConfig, tableConfig, schema);
     indexLoadingConfig.setTableDataDir(_tableDataDir);
-    _indexLoadingConfig = indexLoadingConfig;
+    _cachedTableConfigAndSchema = Pair.of(tableConfig, schema);
     return indexLoadingConfig;
   }
 
   @Override
-  public IndexLoadingConfig getIndexLoadingConfig() {
-    return _indexLoadingConfig;
+  public Pair<TableConfig, Schema> getCachedTableConfigAndSchema() {
+    return _cachedTableConfigAndSchema;
   }
 
   @Override
@@ -437,7 +436,7 @@ public abstract class BaseTableDataManager implements TableDataManager {
     String segmentName = zkMetadata.getSegmentName();
     _logger.info("Downloading and loading segment: {}", segmentName);
     File indexDir = downloadSegment(zkMetadata);
-    addSegment(ImmutableSegmentLoader.load(indexDir, indexLoadingConfig, _segmentOperationsThrottler));
+    addSegment(ImmutableSegmentLoader.load(indexDir, indexLoadingConfig, _segmentOperationsThrottler), zkMetadata);
     _logger.info("Downloaded and loaded segment: {} with CRC: {} on tier: {}", segmentName, zkMetadata.getCrc(),
         TierConfigUtils.normalizeTierName(zkMetadata.getTier()));
   }
@@ -817,7 +816,7 @@ public abstract class BaseTableDataManager implements TableDataManager {
           _logger.info("Reloading segment: {} using existing segment directory as no reprocessing needed", segmentName);
           // No reprocessing needed, reuse the same segment
           ImmutableSegment segment = ImmutableSegmentLoader.load(segmentDirectory, indexLoadingConfig);
-          addSegment(segment);
+          addSegment(segment, zkMetadata);
           return;
         }
         // Create backup directory to handle failure of segment reloading.
@@ -838,7 +837,7 @@ public abstract class BaseTableDataManager implements TableDataManager {
       _logger.info("Loading segment: {} from indexDir: {} to tier: {}", segmentName, indexDir,
           TierConfigUtils.normalizeTierName(zkMetadata.getTier()));
       ImmutableSegment segment = ImmutableSegmentLoader.load(indexDir, indexLoadingConfig, _segmentOperationsThrottler);
-      addSegment(segment);
+      addSegment(segment, zkMetadata);
 
       // Remove backup directory to mark the completion of segment reloading.
       removeBackup(indexDir);
@@ -1217,7 +1216,7 @@ public abstract class BaseTableDataManager implements TableDataManager {
         segmentDirectory = initSegmentDirectory(segmentName, String.valueOf(zkMetadata.getCrc()), indexLoadingConfig);
       }
       ImmutableSegment segment = ImmutableSegmentLoader.load(segmentDirectory, indexLoadingConfig);
-      addSegment(segment);
+      addSegment(segment, zkMetadata);
       _logger.info("Loaded existing segment: {} with CRC: {} on tier: {}", segmentName, zkMetadata.getCrc(),
           TierConfigUtils.normalizeTierName(segmentTier));
       return true;
@@ -1348,6 +1347,13 @@ public abstract class BaseTableDataManager implements TableDataManager {
     Set<String> h3Indexes = FieldIndexConfigsUtil.columnsWithIndexEnabled(StandardIndexes.h3(), indexConfigsMap);
     Set<String> fstIndexes = FieldIndexConfigsUtil.columnsWithIndexEnabled(StandardIndexes.fst(), indexConfigsMap);
     Set<String> textIndexes = FieldIndexConfigsUtil.columnsWithIndexEnabled(StandardIndexes.text(), indexConfigsMap);
+
+    MultiColumnTextIndexConfig multiColumnTextIndex = tableConfig.getIndexingConfig().getMultiColumnTextIndexConfig();
+    MultiColumnTextMetadata multiColumnTextMeta = segmentMetadata.getMultiColumnTextMetadata();
+    if (MultiColumnTextIndexHandler.shouldModifyMultiColTextIndex(multiColumnTextIndex, multiColumnTextMeta)) {
+      return new StaleSegment(segmentName, true, "multi-column text index");
+    }
+
     List<StarTreeIndexConfig> starTreeIndexConfigsFromTableConfig =
         tableConfig.getIndexingConfig().getStarTreeIndexConfigs();
 
@@ -1376,10 +1382,9 @@ public abstract class BaseTableDataManager implements TableDataManager {
 
     for (String columnName : segmentPhysicalColumns) {
       ColumnMetadata columnMetadata = segmentMetadata.getColumnMetadataFor(columnName);
-      FieldSpec fieldSpecInSchema = schema.getFieldSpecFor(columnName);
       DataSource source = segment.getDataSource(columnName);
-      Preconditions.checkNotNull(columnMetadata);
-      Preconditions.checkNotNull(source);
+      assert columnMetadata != null && source != null;
+      FieldSpec fieldSpecInSchema = schema.getFieldSpecFor(columnName);
 
       // Column is deleted
       if (fieldSpecInSchema == null) {

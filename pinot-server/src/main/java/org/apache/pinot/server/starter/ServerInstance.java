@@ -98,6 +98,10 @@ public class ServerInstance {
     _serverMetrics.initializeGlobalMeters();
     _serverMetrics.setValueOfGlobalGauge(ServerGauge.VERSION, PinotVersion.VERSION_METRIC_NAME, 1);
     ServerMetrics.register(_serverMetrics);
+    if (segmentOperationsThrottler != null) {
+      // Initialize the metrics for the throttler so it picks up the newly registered ServerMetrics object
+      segmentOperationsThrottler.initializeMetrics();
+    }
 
     String instanceDataManagerClassName = serverConf.getInstanceDataManagerClassName();
     LOGGER.info("Initializing instance data manager of class: {}", instanceDataManagerClassName);
@@ -160,9 +164,13 @@ public class ServerInstance {
     if (serverConf.isEnableGrpcServer()) {
       int grpcPort = serverConf.getGrpcPort();
       LOGGER.info("Initializing gRPC query server on port: {}", grpcPort);
-      _grpcQueryServer = new GrpcQueryServer(grpcPort, GrpcConfig.buildGrpcQueryConfig(serverConf.getPinotConfig()),
-          serverConf.isGrpcTlsServerEnabled() ? TlsUtils.extractTlsConfig(serverConf.getPinotConfig(),
-              CommonConstants.Server.SERVER_GRPCTLS_PREFIX) : null, _queryExecutor, _serverMetrics, _accessControl);
+      String instanceName = _helixManager.getInstanceName();
+      TlsConfig actualTslConfig = serverConf.isGrpcTlsServerEnabled()
+          ? TlsUtils.extractTlsConfig(serverConf.getPinotConfig(), CommonConstants.Server.SERVER_GRPCTLS_PREFIX)
+          : null;
+      _grpcQueryServer = new GrpcQueryServer(instanceName, grpcPort,
+          GrpcConfig.buildGrpcQueryConfig(serverConf.getPinotConfig()),
+          actualTslConfig, _queryExecutor, _serverMetrics, _accessControl);
     } else {
       _grpcQueryServer = null;
     }

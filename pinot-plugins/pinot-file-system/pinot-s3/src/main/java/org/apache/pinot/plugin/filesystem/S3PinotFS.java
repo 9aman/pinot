@@ -55,6 +55,7 @@ import software.amazon.awssdk.core.checksums.ResponseChecksumValidation;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.core.sync.ResponseTransformer;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.LegacyMd5Plugin;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3ClientBuilder;
 import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
@@ -66,8 +67,11 @@ import software.amazon.awssdk.services.s3.model.CopyObjectRequest;
 import software.amazon.awssdk.services.s3.model.CopyObjectResponse;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse;
+import software.amazon.awssdk.services.s3.model.Delete;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectResponse;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
@@ -76,6 +80,7 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.MetadataDirective;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.ObjectCannedACL;
+import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import software.amazon.awssdk.services.s3.model.S3Exception;
@@ -99,6 +104,7 @@ public class S3PinotFS extends BasePinotFS {
   public static final String S3_SCHEME = "s3";
   public static final String S3A_SCHEME = "s3a";
   public static final String SCHEME_SEPARATOR = "://";
+  public static final int DELETE_BATCH_SIZE = 1000;
 
   private S3Client _s3Client;
   private boolean _disableAcl;
@@ -171,6 +177,9 @@ public class S3PinotFS extends BasePinotFS {
       }
       if (s3Config.getResponseChecksumValidationWhenRequired() == ResponseChecksumValidation.WHEN_REQUIRED) {
         s3ClientBuilder.requestChecksumCalculation(RequestChecksumCalculation.WHEN_REQUIRED);
+      }
+      if (s3Config.useLegacyMd5Plugin()) {
+        s3ClientBuilder.addPlugin(LegacyMd5Plugin.create());
       }
 
       _s3Client = s3ClientBuilder.build();
@@ -388,6 +397,80 @@ public class S3PinotFS extends BasePinotFS {
     } catch (Throwable t) {
       throw new IOException(t);
     }
+  }
+
+  @Override
+  public boolean deleteBatch(List<URI> segmentUris, boolean forceDelete)
+      throws IOException {
+    boolean deletionResult = true;
+    String prevBucket = null;
+    try {
+      List<ObjectIdentifier> objectsToDelete = new ArrayList<>();
+      LOGGER.info("Deleting URIs {} force {}", segmentUris, forceDelete);
+      // initialize the first bucket
+      if (!segmentUris.isEmpty()) {
+        prevBucket = segmentUris.get(0).getHost();
+      }
+      // Iterate through the URIs and delete them
+      for (URI segmentUri : segmentUris) {
+
+        if (isDirectory(segmentUri)) {
+          if (!forceDelete) {
+            Preconditions.checkState(isEmptyDirectory(segmentUri),
+                "ForceDelete flag is not set and directory '%s' is not empty", segmentUri);
+          }
+
+          // Recursively list files in the directory
+          LOGGER.info("Recursively deleting files in directory {}", segmentUri);
+          List<URI> filesInDir = listFiles(segmentUri);
+          deletionResult &= deleteBatch(filesInDir, forceDelete);
+        } else {
+          String key = sanitizePath(segmentUri.getPath());
+          objectsToDelete.add(ObjectIdentifier.builder().key(key).build());
+          String bucket = segmentUri.getHost();
+
+          // If batch reaches max size, process the batch
+          if (objectsToDelete.size() >= DELETE_BATCH_SIZE || !bucket.equals(prevBucket)) {
+            deletionResult &= processBatch(prevBucket, objectsToDelete);
+            objectsToDelete.clear();  // Clear list for the next batch
+            prevBucket = bucket;
+          }
+        }
+      }
+
+      // Process remaining files in the last batch
+      if (!objectsToDelete.isEmpty()) {
+        deletionResult &= processBatch(prevBucket, objectsToDelete);
+      }
+      return deletionResult;
+    } catch (S3Exception e) {
+      throw e;
+    } catch (Exception e) {
+      throw new IOException(e);
+    }
+  }
+
+  private boolean processBatch(String bucket, List<ObjectIdentifier> objectsToDelete) {
+    LOGGER.info("Deleting batch of {} objects", objectsToDelete.size());
+    DeleteObjectsRequest deleteRequest = DeleteObjectsRequest.builder()
+        .bucket(bucket)
+        .delete(Delete.builder().objects(objectsToDelete).build())
+        .build();
+
+    DeleteObjectsResponse deleteResponse = _s3Client.deleteObjects(deleteRequest);
+    LOGGER.info("Failed to delete {} objects", deleteResponse.hasErrors() ? deleteResponse.errors().size() : 0);
+    return deleteResponse.deleted().size() == objectsToDelete.size();
+  }
+
+  private List<URI> listFiles(URI directoryUri)
+      throws IOException {
+    String[] listedFiles = listFiles(directoryUri, true);
+    List<URI> fileUris = new ArrayList<>();
+    for (String filePath : listedFiles) {
+      fileUris.add(URI.create(filePath));
+    }
+    LOGGER.info("Files in directory {}: {}", directoryUri, fileUris);
+    return fileUris;
   }
 
   @Override
